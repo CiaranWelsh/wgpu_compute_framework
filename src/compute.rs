@@ -17,6 +17,19 @@ use wgpu::{self, util::DeviceExt, ShaderModuleDescriptor, ShaderSource, BufferUs
 
 use crate::{buffer::GpuBuffer, context::GpuContext};
 
+
+/// Calculate an (x, y) workgroup grid that covers `total_groups`
+/// workgroups without exceeding the per-dimension limit.
+fn split_workgroups(total_groups: u32, limit: u32) -> (u32, u32) {
+    if total_groups <= limit {
+        (total_groups, 1)
+    } else {
+        let x = limit;
+        let y = (total_groups + limit - 1) / limit; // ceiling-divide
+        (x, y)
+    }
+}
+
 /// Dispatch a compute shader with a single input buffer and return the
 /// results.
 ///
@@ -122,10 +135,14 @@ pub fn run_compute_single_input<T: Pod + Copy>(
         });
         cpass.set_pipeline(&compute_pipeline);
         cpass.set_bind_group(0, &bind_group, &[]);
-        // Dispatch workgroups.  Ceiling divide ensures we launch
-        // enough groups to cover the entire input.
-        let workgroup_count = ((input_buffer.len as u32) + workgroup_size - 1) / workgroup_size;
-        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+
+        // ------------- NEW 2-D DISPATCH LOGIC -------------
+        let limits = context.device.limits();
+        let total_groups = ((input_buffer.len as u32) + workgroup_size - 1) / workgroup_size;
+        let (groups_x, groups_y) =
+            split_workgroups(total_groups, limits.max_compute_workgroups_per_dimension);
+
+        cpass.dispatch_workgroups(groups_x, groups_y, 1);
     }
     // Copy the output buffer into the download buffer so that we can map
     // it on the CPU.  Both buffers have equal length in bytes.
@@ -250,8 +267,13 @@ pub fn run_compute_two_inputs<T: Pod + Copy>(
         });
         cpass.set_pipeline(&compute_pipeline);
         cpass.set_bind_group(0, &bind_group, &[]);
-        let workgroup_count = ((input_a.len() as u32) + workgroup_size - 1) / workgroup_size;
-        cpass.dispatch_workgroups(workgroup_count, 1, 1);
+
+        let limits = context.device.limits();
+        let total_groups = ((input_a.len() as u32) + workgroup_size - 1) / workgroup_size;
+        let (groups_x, groups_y) = split_workgroups(total_groups, limits.max_compute_workgroups_per_dimension);
+
+        cpass.dispatch_workgroups(groups_x, groups_y, 1);
+        
     }
     encoder.copy_buffer_to_buffer(
         &output_buffer.buffer,
