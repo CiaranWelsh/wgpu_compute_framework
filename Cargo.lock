@@ -1387,6 +1387,7 @@ dependencies = [
  "bytemuck",
  "criterion",
  "env_logger",
+ "log",
  "pollster",
  "rand",
  "wgpu",

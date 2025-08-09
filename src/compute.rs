@@ -17,6 +17,153 @@ use wgpu::{self, util::DeviceExt, ShaderModuleDescriptor, ShaderSource, BufferUs
 
 use crate::{buffer::GpuBuffer, context::GpuContext};
 
+/// Dispatch a compute shader with a single input buffer and a custom‑sized
+/// output buffer.  This is a more flexible variant of
+/// [`run_compute_single_input`].  The shader must declare two bindings:
+/// a read‑only storage buffer for the input data at binding 0 and a
+/// read/write storage buffer for the output data at binding 1.  The
+/// length of `input` determines how many workgroups are dispatched,
+/// exactly as in [`run_compute_single_input`], while `output_len`
+/// specifies the number of elements to allocate for the output buffer.
+/// The returned vector has length `output_len` and elements of type
+/// `U`.  The shader is responsible for writing only to the range of
+/// indices [0, output_len).  Any unused output elements are left
+/// undefined.
+///
+/// # Type Parameters
+/// * `T` – element type of the input buffer.  Must implement
+///   [`Pod`](bytemuck::Pod) to ensure safe byte casting.
+/// * `U` – element type of the output buffer.  Must implement
+///   [`Pod`](bytemuck::Pod) to ensure safe byte casting.
+///
+/// # Panics
+/// Panics if `input` is empty or if `output_len` is zero.
+pub fn run_compute_single_input_custom_output<T: Pod + Copy, U: Pod + Copy>(
+    context: &GpuContext,
+    shader_source: &str,
+    entry_point: &str,
+    input: &[T],
+    output_len: usize,
+    workgroup_size: u32,
+) -> Vec<U> {
+    assert!(!input.is_empty(), "input slice must not be empty");
+    assert!(output_len > 0, "output_len must be greater than zero");
+    // Compile shader module
+    let module = context
+        .device
+        .create_shader_module(ShaderModuleDescriptor {
+            label: Some("compute_shader_custom_output"),
+            source: ShaderSource::Wgsl(shader_source.into()),
+        });
+    // Create input buffer
+    let input_buffer = GpuBuffer::<T>::from_slice(
+        context,
+        input,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    );
+    // Create output buffer of type U with length output_len
+    let output_buffer = GpuBuffer::<U>::new_output(
+        context,
+        output_len,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    // Create download buffer for output
+    let download_buffer = GpuBuffer::<U>::new_download(context, output_len);
+    // Bind group layout: two entries (input and output).  Use per‑element
+    // sizes for min_binding_size.  NonZeroU64 is safe because T and U
+    // cannot have zero size due to `Pod`.
+    let element_size_in = std::mem::size_of::<T>() as u64;
+    let element_size_out = std::mem::size_of::<U>() as u64;
+    let min_in = NonZeroU64::new(element_size_in).unwrap();
+    let min_out = NonZeroU64::new(element_size_out).unwrap();
+    let bind_group_layout = context.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("compute_bind_group_layout_custom_output"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(min_in),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(min_out),
+                },
+                count: None,
+            },
+        ],
+    });
+    // Bind group
+    let bind_group = context.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("compute_bind_group_custom_output"),
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: input_buffer.buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output_buffer.buffer.as_entire_binding(),
+            },
+        ],
+    });
+    // Pipeline
+    let pipeline_layout = context.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("compute_pipeline_layout_custom_output"),
+        bind_group_layouts: &[&bind_group_layout],
+        push_constant_ranges: &[],
+    });
+    let compute_pipeline = context.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("compute_pipeline_custom_output"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some(entry_point),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    // Encode commands
+    let mut encoder = context
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("compute_encoder_custom_output") });
+    {
+        // Clear the output buffer to zero before running the kernel.  This
+        // ensures that atomicAdd operations accumulate from a known base.
+        encoder.clear_buffer(&output_buffer.buffer, 0, None);
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("compute_pass_custom_output"),
+            timestamp_writes: None,
+        });
+        cpass.set_pipeline(&compute_pipeline);
+        cpass.set_bind_group(0, &bind_group, &[]);
+        // Dispatch based on number of input elements (one thread per input)
+        let limits = context.device.limits();
+        let total_groups = ((input_buffer.len as u32) + workgroup_size - 1) / workgroup_size;
+        let (groups_x, groups_y) = split_workgroups(total_groups, limits.max_compute_workgroups_per_dimension);
+        cpass.dispatch_workgroups(groups_x, groups_y, 1);
+    }
+    // Copy output buffer to download buffer
+    encoder.copy_buffer_to_buffer(
+        &output_buffer.buffer,
+        0,
+        &download_buffer.buffer,
+        0,
+        (output_len * std::mem::size_of::<U>()) as u64,
+    );
+    let command_buffer = encoder.finish();
+    context.queue.submit([command_buffer]);
+    // Read back results
+    download_buffer.read_to_vec(context)
+}
+
 
 /// Calculate an (x, y) workgroup grid that covers `total_groups`
 /// workgroups without exceeding the per-dimension limit.

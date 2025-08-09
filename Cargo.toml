@@ -15,6 +15,7 @@ wgpu = { version = "26.0.1" }
 bytemuck = { version = "1.14", features = ["derive"] }
 pollster = "0.3"
 env_logger = "0.11.8"
+log = "0.4.27"
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false }

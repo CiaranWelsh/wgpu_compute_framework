@@ -18,4 +18,9 @@ pub mod compute;
 // simply `use wgpu_compute_framework::*;`.
 pub use context::GpuContext;
 pub use buffer::{GpuBuffer};
-pub use compute::{run_compute_single_input, run_compute_two_inputs};
+// Re-export helper functions so users can import directly from the crate root.
+pub use compute::{
+    run_compute_single_input,
+    run_compute_two_inputs,
+    run_compute_single_input_custom_output,
+};
