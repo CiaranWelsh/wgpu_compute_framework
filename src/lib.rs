@@ -22,5 +22,5 @@ pub use buffer::{GpuBuffer};
 pub use compute::{
     run_compute_single_input,
     run_compute_two_inputs,
-    run_compute_single_input_custom_output,
+    run_compute_single_input_custom_output_timed,
 };

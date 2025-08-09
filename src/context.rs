@@ -73,9 +73,14 @@ impl GpuContext {
         // allocation behaviour, and `Trace::Off` disables GPU trace
         // capture.  Note that `request_device` in this release takes
         // only the descriptor.
+        let avail = adapter.features();
+        let mut features = wgpu::Features::empty();
+        if avail.contains(wgpu::Features::TIMESTAMP_QUERY) {
+            features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("wgpu_compute_device"),
-            required_features: wgpu::Features::empty(),
+            required_features: features,
             required_limits: wgpu::Limits::downlevel_defaults(),
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             trace: wgpu::Trace::Off,
@@ -105,11 +110,16 @@ impl GpuContext {
         if !capabilities.flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS) {
             return Err("Selected adapter does not support compute shaders".into());
         }
+        let avail = adapter.features();
+        let mut features = wgpu::Features::empty();
+        if avail.contains(wgpu::Features::TIMESTAMP_QUERY) {
+            features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("wgpu_compute_device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: features,
                     required_limits: wgpu::Limits::downlevel_defaults(),
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                     trace: wgpu::Trace::Off,
